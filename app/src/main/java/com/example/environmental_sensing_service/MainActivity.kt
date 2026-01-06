@@ -129,18 +129,23 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            val ess = g.getService(ESS_UUID) ?: return
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            val ess = gatt.getService(ESS_UUID) ?: return
+
             listOf(TEMP_UUID, HUM_UUID, PRESS_UUID).forEach { uuid ->
                 ess.getCharacteristic(uuid)?.let { c ->
-                    g.setCharacteristicNotification(c, true)
-                    c.getDescriptor(CCCD_UUID)?.apply {
-                        value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        g.writeDescriptor(this)
+                    gatt.setCharacteristicNotification(c, true)
+                    c.getDescriptor(CCCD_UUID)?.let { d ->
+                        d.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        cccdQueue.add(d)
                     }
                 }
             }
+
+            // Lance l'écriture du PREMIER descripteur
+            cccdQueue.poll()?.let { gatt.writeDescriptor(it) }
         }
+
 
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
