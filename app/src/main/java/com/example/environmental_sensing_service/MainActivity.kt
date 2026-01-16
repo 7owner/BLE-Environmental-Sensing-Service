@@ -32,6 +32,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.draw.scale
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.core.app.ActivityCompat
 import com.example.environmental_sensing_service.ui.theme.EnvironmentalSensingServiceTheme
 import java.io.BufferedReader
@@ -336,18 +342,16 @@ fun BLEScreen(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             if (!BLEState.isConnected)
-                DeviceList(onDeviceSelected, onStartScan, onStopScan)
+                DeviceList(onDeviceSelected)
             else
-                Dashboard(onDisconnect, onViewHistory)
+                Dashboard(onDisconnect, onViewHistory, onStartScan, onStopScan)
         }
     }
 }
 
 @Composable
 fun DeviceList(
-    onDeviceSelected: (BluetoothDevice) -> Unit,
-    onStartScan: () -> Unit,
-    onStopScan: () -> Unit
+    onDeviceSelected: (BluetoothDevice) -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(20.dp)) {
         Text(
@@ -355,25 +359,6 @@ fun DeviceList(
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onBackground
         )
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilledTonalButton(
-                onClick = onStartScan,
-                modifier = Modifier.weight(1f),
-                enabled = !BLEState.isScanning
-            ) {
-                Icon(Icons.Filled.Refresh, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Scanner")
-            }
-            OutlinedButton(
-                onClick = onStopScan,
-                modifier = Modifier.weight(1f),
-                enabled = BLEState.isScanning
-            ) {
-                Text("Stop")
-            }
-        }
         Spacer(Modifier.height(12.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(BLEState.devices.size) {
@@ -406,7 +391,12 @@ fun DeviceList(
 }
 
 @Composable
-fun Dashboard(onDisconnect: () -> Unit, onViewHistory: () -> Unit) {
+fun Dashboard(
+    onDisconnect: () -> Unit,
+    onViewHistory: () -> Unit,
+    onStartScan: () -> Unit,
+    onStopScan: () -> Unit
+) {
     var analysis by remember { mutableStateOf<AnalysisTarget?>(null) }
 
     Column(
@@ -417,6 +407,47 @@ fun Dashboard(onDisconnect: () -> Unit, onViewHistory: () -> Unit) {
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onBackground
         )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FilledTonalButton(
+                onClick = onStartScan,
+                modifier = Modifier.weight(1f),
+                enabled = !BLEState.isScanning
+            ) {
+                Icon(Icons.Filled.Refresh, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Scanner")
+            }
+            OutlinedButton(
+                onClick = onStopScan,
+                modifier = Modifier.weight(1f),
+                enabled = BLEState.isScanning
+            ) {
+                Text("Stop")
+            }
+        }
+        if (BLEState.isScanning) {
+            val pulse = rememberInfiniteTransition(label = "scanPulse")
+            val scale by pulse.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.05f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(700, easing = LinearEasing),
+                    repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+                ),
+                label = "scanPulseScale"
+            )
+            Spacer(Modifier.height(10.dp))
+            AssistChip(
+                onClick = {},
+                label = { Text("Scanning...") },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    labelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ),
+                modifier = Modifier.scale(scale)
+            )
+        }
         Spacer(Modifier.height(12.dp))
         Sensor(
             "Temperature",
