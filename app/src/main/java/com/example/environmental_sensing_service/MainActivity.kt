@@ -614,7 +614,8 @@ fun Dashboard(
         AnalysisDialog(
             target = target,
             onDismiss = { analysis = null },
-            onEditThresholds = onEditThresholds
+            onEditThresholds = onEditThresholds,
+            historyData = filtered
         )
     }
 }
@@ -673,7 +674,8 @@ enum class AnalysisTarget {
 fun AnalysisDialog(
     target: AnalysisTarget,
     onDismiss: () -> Unit,
-    onEditThresholds: () -> Unit
+    onEditThresholds: () -> Unit,
+    historyData: List<SensorData>? = null
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -692,13 +694,18 @@ fun AnalysisDialog(
                 AnalysisTarget.Pressure -> "hPa"
             }
             val value = when (target) {
-                AnalysisTarget.Temperature -> BLEState.temperature
-                AnalysisTarget.Humidity -> BLEState.humidity
-                AnalysisTarget.Pressure -> BLEState.pressure
+                AnalysisTarget.Temperature -> historyData?.lastOrNull { it.temperature != null }?.temperature
+                    ?: BLEState.temperature
+                AnalysisTarget.Humidity -> historyData?.lastOrNull { it.humidity != null }?.humidity
+                    ?: BLEState.humidity
+                AnalysisTarget.Pressure -> historyData?.lastOrNull { it.pressure != null }?.pressure
+                    ?: BLEState.pressure
             }
             val points = when (target) {
-                AnalysisTarget.Temperature -> buildPointsFromHistory(BLEState.tempHistory)
-                AnalysisTarget.Humidity -> buildPointsFromHistory(BLEState.humHistory)
+                AnalysisTarget.Temperature -> historyData?.let { buildPoints(it) { data -> data.temperature } }
+                    ?: buildPointsFromHistory(BLEState.tempHistory)
+                AnalysisTarget.Humidity -> historyData?.let { buildPoints(it) { data -> data.humidity } }
+                    ?: buildPointsFromHistory(BLEState.humHistory)
                 AnalysisTarget.Pressure -> emptyList()
             }
 
