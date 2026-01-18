@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -58,7 +57,7 @@ import java.util.*
 import java.util.ArrayDeque
 
 // Charts
-c'estimport co.yml.charts.axis.AxisData
+import co.yml.charts.axis.AxisData
 import co.yml.charts.axis.Gravity
 import co.yml.charts.common.model.Point
 import co.yml.charts.ui.linechart.LineChart
@@ -910,7 +909,7 @@ fun MiniBars(points: List<Point>) {
 fun ThresholdsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("thresholds", Context.MODE_PRIVATE) }
-    var temp by rememberSaveable {
+    var temp by remember {
         mutableStateOf(
             Thresholds(
                 prefs.getFloat("tempGoodMin", ThresholdState.temperature.goodMin),
@@ -920,7 +919,7 @@ fun ThresholdsScreen(onBack: () -> Unit) {
             )
         )
     }
-    var hum by rememberSaveable {
+    var hum by remember {
         mutableStateOf(
             Thresholds(
                 prefs.getFloat("humGoodMin", ThresholdState.humidity.goodMin),
