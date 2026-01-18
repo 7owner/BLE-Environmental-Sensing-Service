@@ -11,7 +11,9 @@ data class SensorData(
     val timestamp: Long,
     val temperature: Double?,
     val humidity: Double?,
-    val pressure: Double?
+    val pressure: Double?,
+    val pm25: Double?,
+    val pm10: Double?
 ) {
     fun toCsv() = toCsvString()
 
@@ -28,7 +30,9 @@ data class SensorData(
         val temp = temperature?.let { "%.2f".format(it) } ?: ""
         val hum = humidity?.let { "%.2f".format(it) } ?: ""
         val press = pressure?.let { "%.2f".format(it) } ?: ""
-        return "${timestamp},${temp},${hum},${press}"
+        val p25 = pm25?.let { "%.2f".format(it) } ?: ""
+        val p10 = pm10?.let { "%.2f".format(it) } ?: ""
+        return "${timestamp},${temp},${hum},${press},${p25},${p10}"
     }
 }
 
@@ -49,12 +53,14 @@ fun readAndFilterSensorData(
                     var line: String?
                     while (br.readLine().also { line = it } != null) {
                         val parts = line?.split(',')
-                        if (parts != null && parts.size == 4) {
+                        if (parts != null && parts.size >= 4) {
                             try {
                                 val timestamp = parts[0].toLong()
                                 val temperature = parts[1].toDoubleOrNull()
                                 val humidity = parts[2].toDoubleOrNull()
                                 val pressure = parts[3].toDoubleOrNull()
+                                val pm25 = parts.getOrNull(4)?.toDoubleOrNull()
+                                val pm10 = parts.getOrNull(5)?.toDoubleOrNull()
 
                                 // Apply date filter
                                 val isAfterStartDate = startDateMillis == null || timestamp >= startDateMillis
@@ -66,7 +72,9 @@ fun readAndFilterSensorData(
                                             timestamp,
                                             temperature,
                                             humidity,
-                                            pressure
+                                            pressure,
+                                            pm25,
+                                            pm10
                                         )
                                     )
                                 }

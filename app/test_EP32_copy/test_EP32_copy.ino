@@ -20,6 +20,9 @@ static BLEUUID TIME_UUID("0000FF11-0000-1000-8000-00805f9b34fb");
 static BLEUUID DATA_SERVICE_UUID("0000FF20-0000-1000-8000-00805f9b34fb");
 static BLEUUID DATA_REQ_UUID("0000FF21-0000-1000-8000-00805f9b34fb");
 static BLEUUID DATA_CHUNK_UUID("0000FF22-0000-1000-8000-00805f9b34fb");
+static BLEUUID PMS_SERVICE_UUID("0000FF30-0000-1000-8000-00805f9b34fb");
+static BLEUUID PM25_UUID("0000FF31-0000-1000-8000-00805f9b34fb");
+static BLEUUID PM10_UUID("0000FF32-0000-1000-8000-00805f9b34fb");
 
 static const char *DATA_FILE = "/data.csv";
 static const uint32_t RETENTION_SECONDS = 4UL * 30UL * 24UL * 3600UL;
@@ -33,6 +36,8 @@ BLECharacteristic *pressChar;
 BLECharacteristic *timeChar;
 BLECharacteristic *dataReqChar;
 BLECharacteristic *dataChunkChar;
+BLECharacteristic *pm25Char;
+BLECharacteristic *pm10Char;
 
 Adafruit_BME280 bme;
 Preferences prefs;
@@ -41,12 +46,19 @@ bool deviceConnected = false;
 bool notifyTemp  = false;
 bool notifyHum   = false;
 bool notifyPress = false;
+bool notifyPm25  = false;
+bool notifyPm10  = false;
 bool timeSynced = false;
 int64_t epochOffset = 0;
 uint32_t writeCounter = 0;
 uint32_t readOffset = 0;
 
 const size_t CHUNK_SIZE = 180;
+const int PMS_RX_PIN = 16;
+const int PMS_TX_PIN = 17;
+
+uint16_t lastPm25 = 0;
+uint16_t lastPm10 = 0;
 
 /* =========================================================
    CALLBACKS SERVEUR
@@ -76,6 +88,8 @@ class CCCDCallbacks : public BLEDescriptorCallbacks {
     if (u.equals(TEMP_UUID))  notifyTemp  = enabled;
     if (u.equals(HUM_UUID))   notifyHum   = enabled;
     if (u.equals(PRESS_UUID)) notifyPress = enabled;
+    if (u.equals(PM25_UUID))  notifyPm25  = enabled;
+    if (u.equals(PM10_UUID))  notifyPm10  = enabled;
 
     Serial.printf(
       "[CCCD] Temp=%d | Hum=%d | Press=%d\n",
@@ -122,6 +136,9 @@ void setup() {
   /* ===== BME280 ===== */
   Wire.begin();
 
+  Serial2.begin(9600, SERIAL_8N1, PMS_RX_PIN, PMS_TX_PIN);
+  Serial.println("[PMS7003] UART2 init");
+
   if (!LittleFS.begin(true)) {
     Serial.println("[FS] ? LittleFS init fail");
     while (1);
@@ -149,6 +166,7 @@ void setup() {
   BLEService *ess = server->createService(ESS_UUID);
   BLEService *timeService = server->createService(TIME_SERVICE_UUID);
   BLEService *dataService = server->createService(DATA_SERVICE_UUID);
+  BLEService *pmsService = server->createService(PMS_SERVICE_UUID);
 
   auto createChar = [&](BLEUUID uuid) {
     BLECharacteristic *c = ess->createCharacteristic(
@@ -188,9 +206,22 @@ void setup() {
   );
   dataChunkChar->addDescriptor(new BLE2902());
 
+  pm25Char = pmsService->createCharacteristic(
+    PM25_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pm25Char->addDescriptor(new BLE2902());
+
+  pm10Char = pmsService->createCharacteristic(
+    PM10_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pm10Char->addDescriptor(new BLE2902());
+
   ess->start();
   timeService->start();
   dataService->start();
+  pmsService->start();
   Serial.println("[GATT] Service ESS démarré");
 
   /* ===== ADVERTISING (VERSION COMPATIBLE) ===== */
@@ -226,6 +257,8 @@ void loop() {
   float t = bme.readTemperature();
   float h = bme.readHumidity();
   float p = bme.readPressure() / 100.0;
+
+  readPms();
 
   uint32_t epoch = (uint32_t)((millis() / 1000) + epochOffset);
 
@@ -276,6 +309,16 @@ void loop() {
     pressChar->notify();
   }
 
+  if (notifyPm25) {
+    pm25Char->setValue((uint8_t*)&lastPm25, 2);
+    pm25Char->notify();
+  }
+
+  if (notifyPm10) {
+    pm10Char->setValue((uint8_t*)&lastPm10, 2);
+    pm10Char->notify();
+  }
+
   if (deviceConnected) {
     File in = LittleFS.open(DATA_FILE, FILE_READ);
     if (in) {
@@ -292,4 +335,21 @@ void loop() {
       in.close();
     }
   }
+}
+
+bool readPms() {
+  static uint8_t buffer[32];
+  while (Serial2.available() >= 32) {
+    if (Serial2.read() != 0x42) continue;
+    if (Serial2.read() != 0x4D) continue;
+    buffer[0] = 0x42;
+    buffer[1] = 0x4D;
+    Serial2.readBytes(buffer + 2, 30);
+    uint16_t pm25 = (buffer[12] << 8) | buffer[13];
+    uint16_t pm10 = (buffer[14] << 8) | buffer[15];
+    lastPm25 = pm25;
+    lastPm10 = pm10;
+    return true;
+  }
+  return false;
 }

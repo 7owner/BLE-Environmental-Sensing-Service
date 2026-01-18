@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -90,6 +91,9 @@ class MainActivity : ComponentActivity() {
     private val DATA_SERVICE_UUID = UUID.fromString("0000FF20-0000-1000-8000-00805f9b34fb")
     private val DATA_REQ_UUID = UUID.fromString("0000FF21-0000-1000-8000-00805f9b34fb")
     private val DATA_CHUNK_UUID = UUID.fromString("0000FF22-0000-1000-8000-00805f9b34fb")
+    private val PMS_SERVICE_UUID = UUID.fromString("0000FF30-0000-1000-8000-00805f9b34fb")
+    private val PM25_UUID = UUID.fromString("0000FF31-0000-1000-8000-00805f9b34fb")
+    private val PM10_UUID = UUID.fromString("0000FF32-0000-1000-8000-00805f9b34fb")
 
     private val FILE = "sensor_data.csv"
 
@@ -104,7 +108,7 @@ class MainActivity : ComponentActivity() {
 
         if (!getFileStreamPath(FILE).exists()) {
             openFileOutput(FILE, Context.MODE_APPEND)
-                .write("timestamp,temp,hum,press\n".toByteArray())
+                .write("timestamp,temp,hum,press,pm25,pm10\n".toByteArray())
         }
         scanner = getSystemService(BluetoothManager::class.java)
             .adapter.bluetoothLeScanner
@@ -264,6 +268,20 @@ class MainActivity : ComponentActivity() {
                     BLEState.reset()
                 }
             }
+            val pmsService = g.getService(PMS_SERVICE_UUID)
+            val pm25Char = pmsService?.getCharacteristic(PM25_UUID)
+            val pm10Char = pmsService?.getCharacteristic(PM10_UUID)
+            listOfNotNull(pm25Char, pm10Char).forEach { c ->
+                try {
+                    g.setCharacteristicNotification(c, true)
+                    c.getDescriptor(CCCD_UUID)?.apply {
+                        value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        cccdQueue.add(this)
+                    }
+                } catch (e: SecurityException) {
+                    BLEState.reset()
+                }
+            }
             syncTime(g)
             requestData(g, 0)
             writeNext(g)
@@ -288,6 +306,8 @@ class MainActivity : ComponentActivity() {
                 TEMP_UUID -> BLEState.addTemp(bb.short / 100.0)
                 HUM_UUID -> BLEState.addHum(bb.short / 100.0)
                 PRESS_UUID -> BLEState.pressure = bb.int / 100.0
+                PM25_UUID -> BLEState.addPm25(bb.short.toDouble())
+                PM10_UUID -> BLEState.addPm10(bb.short.toDouble())
             }
             save(System.currentTimeMillis())
         }
@@ -344,7 +364,7 @@ class MainActivity : ComponentActivity() {
     private fun save(t: Long) {
         openFileOutput(FILE, Context.MODE_APPEND).use {
             it.write(
-                "$t,${BLEState.temperature},${BLEState.humidity},${BLEState.pressure}\n"
+                "$t,${BLEState.temperature},${BLEState.humidity},${BLEState.pressure},${BLEState.pm25},${BLEState.pm10}\n"
                     .toByteArray()
             )
         }
@@ -358,11 +378,15 @@ object BLEState {
     var temperature by mutableStateOf<Double?>(null)
     var humidity by mutableStateOf<Double?>(null)
     var pressure by mutableStateOf<Double?>(null)
+    var pm25 by mutableStateOf<Double?>(null)
+    var pm10 by mutableStateOf<Double?>(null)
     var isConnected by mutableStateOf(false)
     var isScanning by mutableStateOf(false)
 
     val tempHistory = mutableStateListOf<Pair<Long, Double>>()
     val humHistory = mutableStateListOf<Pair<Long, Double>>()
+    val pm25History = mutableStateListOf<Pair<Long, Double>>()
+    val pm10History = mutableStateListOf<Pair<Long, Double>>()
 
     fun addDevice(d: BluetoothDevice) {
         if (!devices.contains(d)) devices.add(d)
@@ -378,13 +402,27 @@ object BLEState {
         humHistory.add(System.currentTimeMillis() to v)
     }
 
+    fun addPm25(v: Double) {
+        pm25 = v
+        pm25History.add(System.currentTimeMillis() to v)
+    }
+
+    fun addPm10(v: Double) {
+        pm10 = v
+        pm10History.add(System.currentTimeMillis() to v)
+    }
+
     fun reset() {
         devices.clear()
         tempHistory.clear()
         humHistory.clear()
+        pm25History.clear()
+        pm10History.clear()
         temperature = null
         humidity = null
         pressure = null
+        pm25 = null
+        pm10 = null
         isConnected = false
         isScanning = false
     }
@@ -585,6 +623,20 @@ fun Dashboard(
             unit = "hPa",
             onView = { analysis = AnalysisTarget.Pressure }
         )
+        Sensor(
+            label = "PM2.5",
+            icon = Icons.Filled.Cloud,
+            v = BLEState.pm25,
+            unit = "ug/m3",
+            onView = { analysis = AnalysisTarget.Pm25 }
+        )
+        Sensor(
+            label = "PM10",
+            icon = Icons.Filled.Cloud,
+            v = BLEState.pm10,
+            unit = "ug/m3",
+            onView = { analysis = AnalysisTarget.Pm10 }
+        )
         LiveOverlayChart(
             buildPointsFromHistory(BLEState.tempHistory),
             buildPointsFromHistory(BLEState.humHistory)
@@ -614,8 +666,7 @@ fun Dashboard(
         AnalysisDialog(
             target = target,
             onDismiss = { analysis = null },
-            onEditThresholds = onEditThresholds,
-            historyData = filtered
+            onEditThresholds = onEditThresholds
         )
     }
 }
@@ -667,7 +718,9 @@ fun Sensor(
 enum class AnalysisTarget {
     Temperature,
     Humidity,
-    Pressure
+    Pressure,
+    Pm25,
+    Pm10
 }
 
 @Composable
@@ -687,11 +740,15 @@ fun AnalysisDialog(
                 AnalysisTarget.Temperature -> "Temperature"
                 AnalysisTarget.Humidity -> "Humidite"
                 AnalysisTarget.Pressure -> "Pression"
+                AnalysisTarget.Pm25 -> "PM2.5"
+                AnalysisTarget.Pm10 -> "PM10"
             }
             val unit = when (target) {
                 AnalysisTarget.Temperature -> "C"
                 AnalysisTarget.Humidity -> "%"
                 AnalysisTarget.Pressure -> "hPa"
+                AnalysisTarget.Pm25 -> "ug/m3"
+                AnalysisTarget.Pm10 -> "ug/m3"
             }
             val value = when (target) {
                 AnalysisTarget.Temperature -> historyData?.lastOrNull { it.temperature != null }?.temperature
@@ -700,6 +757,10 @@ fun AnalysisDialog(
                     ?: BLEState.humidity
                 AnalysisTarget.Pressure -> historyData?.lastOrNull { it.pressure != null }?.pressure
                     ?: BLEState.pressure
+                AnalysisTarget.Pm25 -> historyData?.lastOrNull { it.pm25 != null }?.pm25
+                    ?: BLEState.pm25
+                AnalysisTarget.Pm10 -> historyData?.lastOrNull { it.pm10 != null }?.pm10
+                    ?: BLEState.pm10
             }
             val points = when (target) {
                 AnalysisTarget.Temperature -> historyData?.let { buildPoints(it) { data -> data.temperature } }
@@ -707,6 +768,10 @@ fun AnalysisDialog(
                 AnalysisTarget.Humidity -> historyData?.let { buildPoints(it) { data -> data.humidity } }
                     ?: buildPointsFromHistory(BLEState.humHistory)
                 AnalysisTarget.Pressure -> emptyList()
+                AnalysisTarget.Pm25 -> historyData?.let { buildPoints(it) { data -> data.pm25 } }
+                    ?: buildPointsFromHistory(BLEState.pm25History)
+                AnalysisTarget.Pm10 -> historyData?.let { buildPoints(it) { data -> data.pm10 } }
+                    ?: buildPointsFromHistory(BLEState.pm10History)
             }
 
             Column(
@@ -740,13 +805,21 @@ fun AnalysisDialog(
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                if (target == AnalysisTarget.Temperature || target == AnalysisTarget.Humidity) {
+                if (target == AnalysisTarget.Temperature || target == AnalysisTarget.Humidity || target == AnalysisTarget.Pm25 || target == AnalysisTarget.Pm10) {
                     val quality = when (target) {
                         AnalysisTarget.Temperature -> qualityForTemperature(value)
                         AnalysisTarget.Humidity -> qualityForHumidity(value)
+                        AnalysisTarget.Pm25 -> qualityForPm25(value)
+                        AnalysisTarget.Pm10 -> qualityForPm10(value)
                         else -> Quality.Medium
                     }
-                    val gaugeRange = if (target == AnalysisTarget.Temperature) 10f..35f else 20f..80f
+                    val gaugeRange = when (target) {
+                        AnalysisTarget.Temperature -> 10f..35f
+                        AnalysisTarget.Humidity -> 20f..80f
+                        AnalysisTarget.Pm25 -> 0f..150f
+                        AnalysisTarget.Pm10 -> 0f..200f
+                        else -> 0f..100f
+                    }
                     HealthGauge(value, unit, gaugeRange, quality)
                     Spacer(Modifier.height(12.dp))
                     MiniBars(points)
@@ -816,6 +889,20 @@ object ThresholdState {
 fun qualityForTemperature(value: Double?): Quality = qualityFor(value, ThresholdState.temperature)
 
 fun qualityForHumidity(value: Double?): Quality = qualityFor(value, ThresholdState.humidity)
+
+fun qualityForPm25(value: Double?): Quality = when {
+    value == null -> Quality.Medium
+    value > 55 -> Quality.Bad
+    value > 35 -> Quality.Medium
+    else -> Quality.Good
+}
+
+fun qualityForPm10(value: Double?): Quality = when {
+    value == null -> Quality.Medium
+    value > 150 -> Quality.Bad
+    value > 80 -> Quality.Medium
+    else -> Quality.Good
+}
 
 fun qualityFor(value: Double?, thresholds: Thresholds): Quality = when {
     value == null -> Quality.Medium
@@ -1044,7 +1131,7 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         context.contentResolver.openOutputStream(uri)?.use {
-            it.write("timestamp,temp,hum,press\n".toByteArray())
+            it.write("timestamp,temp,hum,press,pm25,pm10\n".toByteArray())
             data.forEach { d -> it.write((d.toCsv() + "\n").toByteArray()) }
         }
         Toast.makeText(context, "CSV exporté ✔", Toast.LENGTH_SHORT).show()
@@ -1061,7 +1148,9 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
                             p[0].toLong(),
                             p[1].toDoubleOrNull(),
                             p[2].toDoubleOrNull(),
-                            p[3].toDoubleOrNull()
+                            p[3].toDoubleOrNull(),
+                            p.getOrNull(4)?.toDoubleOrNull(),
+                            p.getOrNull(5)?.toDoubleOrNull()
                         )
                     )
             }
@@ -1125,6 +1214,8 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
             val filtered = filterByRange(data, range)
             val temps = filtered.mapNotNull { it.temperature }
             val hums = filtered.mapNotNull { it.humidity }
+            val pm25s = filtered.mapNotNull { it.pm25 }
+            val pm10s = filtered.mapNotNull { it.pm10 }
 
             computeStats(temps)?.let {
                 StatsCard(
@@ -1142,6 +1233,24 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
                     it,
                     Color.Blue,
                     onView = { analysis = AnalysisTarget.Humidity }
+                )
+            }
+            computeStats(pm25s)?.let {
+                StatsCard(
+                    "PM2.5",
+                    "ug/m3",
+                    it,
+                    Color(0xFF4D7CFE),
+                    onView = { analysis = AnalysisTarget.Pm25 }
+                )
+            }
+            computeStats(pm10s)?.let {
+                StatsCard(
+                    "PM10",
+                    "ug/m3",
+                    it,
+                    Color(0xFF6E61E6),
+                    onView = { analysis = AnalysisTarget.Pm10 }
                 )
             }
 
