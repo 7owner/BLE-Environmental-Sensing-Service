@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -173,7 +174,10 @@ class MainActivity : ComponentActivity() {
     private fun startScan() {
         if (has(Manifest.permission.BLUETOOTH_SCAN)) {
             try {
-                scanner.startScan(scanCallback)
+                val settings = ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .build()
+                scanner.startScan(null, settings, scanCallback)
                 BLEState.isScanning = true
             } catch (e: SecurityException) {
                 BLEState.reset()
@@ -194,12 +198,23 @@ class MainActivity : ComponentActivity() {
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(t: Int, r: ScanResult) {
+            Log.d("BLE", "Found: ${r.device.name} ${r.device.address} rssi=${r.rssi}")
             if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
             try {
                 BLEState.addDevice(r.device)
             } catch (e: SecurityException) {
                 BLEState.reset()
             }
+        }
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>) {
+            results.forEach {
+                Log.d("BLE", "Batch: ${it.device.name} ${it.device.address} rssi=${it.rssi}")
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e("BLE", "Scan failed: $errorCode")
         }
     }
 
@@ -591,15 +606,17 @@ fun Dashboard(
                 label = "scanPulseScale"
             )
             Spacer(Modifier.height(10.dp))
-            AssistChip(
-                onClick = {},
-                label = { Text("Scanning...") },
-                colors = AssistChipDefaults.assistChipColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    labelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                ),
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = MaterialTheme.shapes.small,
                 modifier = Modifier.scale(scale)
-            )
+            ) {
+                Text(
+                    "Scanning...",
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
         }
         Spacer(Modifier.height(12.dp))
         Sensor(
@@ -795,14 +812,16 @@ fun AnalysisDialog(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(Modifier.weight(1f))
-                    AssistChip(
-                        onClick = {},
-                        label = { Text("Live") },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            labelColor = MaterialTheme.colorScheme.primary
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            "Live",
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.primary
                         )
-                    )
+                    }
                 }
                 Spacer(Modifier.height(16.dp))
                 if (target == AnalysisTarget.Temperature || target == AnalysisTarget.Humidity || target == AnalysisTarget.Pm25 || target == AnalysisTarget.Pm10) {
