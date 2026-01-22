@@ -99,20 +99,27 @@ class MainActivity : ComponentActivity() {
     private val FILE = "sensor_data.csv"
 
     private lateinit var scanner: BluetoothLeScanner
+    private lateinit var bluetoothAdapter: BluetoothAdapter
     private var gatt: BluetoothGatt? = null
     private val cccdQueue = ArrayDeque<BluetoothGattDescriptor>()
     private var writing = false
     private var dataOffset = 0
+    private var legacyScan = false
+    private var initialReadsDone = false
+    private var polling = false
+    private val readQueue = ArrayDeque<BluetoothGattCharacteristic>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        window.decorView.setOnHoverListener { _, _ -> true }
 
         if (!getFileStreamPath(FILE).exists()) {
             openFileOutput(FILE, Context.MODE_APPEND)
                 .write("timestamp,temp,hum,press,pm25,pm10\n".toByteArray())
         }
-        scanner = getSystemService(BluetoothManager::class.java)
-            .adapter.bluetoothLeScanner
+        bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
+        scanner = bluetoothAdapter.bluetoothLeScanner
 
         requestPermissions()
 
@@ -174,12 +181,11 @@ class MainActivity : ComponentActivity() {
     private fun startScan() {
         if (has(Manifest.permission.BLUETOOTH_SCAN)) {
             try {
-                val settings = ScanSettings.Builder()
-                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                    .build()
-                scanner.startScan(null, settings, scanCallback)
+                legacyScan = true
+                bluetoothAdapter.startLeScan(legacyLeScan)
                 BLEState.isScanning = true
             } catch (e: SecurityException) {
+                Toast.makeText(this, "BLE scan refuse (permission)", Toast.LENGTH_SHORT).show()
                 BLEState.reset()
             }
         }
@@ -188,11 +194,28 @@ class MainActivity : ComponentActivity() {
     private fun stopScan() {
         if (has(Manifest.permission.BLUETOOTH_SCAN)) {
             try {
-                scanner.stopScan(scanCallback)
+                if (legacyScan) {
+                    bluetoothAdapter.stopLeScan(legacyLeScan)
+                    legacyScan = false
+                } else {
+                    scanner.stopScan(scanCallback)
+                }
                 BLEState.isScanning = false
             } catch (e: SecurityException) {
                 BLEState.reset()
             }
+        }
+    }
+
+    private val legacyLeScan = BluetoothAdapter.LeScanCallback { device, rssi, _ ->
+        if (device.name != null && device.name.contains("ESP32", ignoreCase = true)) {
+            Log.d("BLE", "Legacy: ${device.name} ${device.address} rssi=$rssi")
+        }
+        if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return@LeScanCallback
+        try {
+            BLEState.addDevice(device)
+        } catch (e: SecurityException) {
+            BLEState.reset()
         }
     }
 
@@ -246,28 +269,36 @@ class MainActivity : ComponentActivity() {
         override fun onConnectionStateChange(g: BluetoothGatt, s: Int, n: Int) {
             if (n == BluetoothProfile.STATE_CONNECTED) {
                 BLEState.isConnected = true
+                initialReadsDone = false
+                polling = true
                 if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
                 try {
                     g.discoverServices()
                 } catch (e: SecurityException) {
                     BLEState.reset()
                 }
-            } else BLEState.reset()
+            } else {
+                polling = false
+                BLEState.reset()
+            }
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, s: Int) {
             if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
-            val ess = g.getService(ESS_UUID) ?: return
-            listOf(TEMP_UUID, HUM_UUID, PRESS_UUID).forEach {
-                val c = ess.getCharacteristic(it) ?: return@forEach
-                try {
-                    g.setCharacteristicNotification(c, true)
-                    c.getDescriptor(CCCD_UUID)?.apply {
-                        value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        cccdQueue.add(this)
+            val ess = g.getService(ESS_UUID)
+            if (ess != null) {
+                listOf(TEMP_UUID, HUM_UUID, PRESS_UUID).forEach {
+                    val c = ess.getCharacteristic(it) ?: return@forEach
+                    try {
+                        g.setCharacteristicNotification(c, true)
+                        c.getDescriptor(CCCD_UUID)?.apply {
+                            value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            cccdQueue.add(this)
+                        }
+                        g.readCharacteristic(c)
+                    } catch (e: SecurityException) {
+                        BLEState.reset()
                     }
-                } catch (e: SecurityException) {
-                    BLEState.reset()
                 }
             }
             val dataService = g.getService(DATA_SERVICE_UUID)
@@ -300,11 +331,18 @@ class MainActivity : ComponentActivity() {
             syncTime(g)
             requestData(g, 0)
             writeNext(g)
+            if (polling) {
+                startPolling(g)
+            }
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, s: Int) {
             writing = false
             writeNext(g)
+            if (!initialReadsDone && cccdQueue.isEmpty()) {
+                initialReadsDone = true
+                readAllCharacteristics(g)
+            }
         }
 
         override fun onCharacteristicChanged(
@@ -316,15 +354,47 @@ class MainActivity : ComponentActivity() {
                 appendChunk(v)
                 return
             }
+            if (v.isEmpty()) return
             val bb = ByteBuffer.wrap(v).order(ByteOrder.LITTLE_ENDIAN)
             when (c.uuid) {
-                TEMP_UUID -> BLEState.addTemp(bb.short / 100.0)
-                HUM_UUID -> BLEState.addHum(bb.short / 100.0)
-                PRESS_UUID -> BLEState.pressure = bb.int / 100.0
-                PM25_UUID -> BLEState.addPm25(bb.short.toDouble())
-                PM10_UUID -> BLEState.addPm10(bb.short.toDouble())
+                TEMP_UUID -> if (v.size >= 2) {
+                    val value = bb.short / 100.0
+                    Log.d("BLE", "Temp=${value}")
+                    BLEState.addTemp(value)
+                }
+                HUM_UUID -> if (v.size >= 2) {
+                    val value = bb.short / 100.0
+                    Log.d("BLE", "Hum=${value}")
+                    BLEState.addHum(value)
+                }
+                PRESS_UUID -> if (v.size >= 4) {
+                    val value = bb.int / 100.0
+                    Log.d("BLE", "Press=${value}")
+                    BLEState.pressure = value
+                }
+                PM25_UUID -> if (v.size >= 2) {
+                    val value = bb.short.toDouble()
+                    Log.d("BLE", "PM25=${value}")
+                    BLEState.addPm25(value)
+                }
+                PM10_UUID -> if (v.size >= 2) {
+                    val value = bb.short.toDouble()
+                    Log.d("BLE", "PM10=${value}")
+                    BLEState.addPm10(value)
+                }
             }
             save(System.currentTimeMillis())
+        }
+
+        override fun onCharacteristicRead(
+            g: BluetoothGatt,
+            c: BluetoothGattCharacteristic,
+            v: ByteArray,
+            status: Int
+        ) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            onCharacteristicChanged(g, c, v)
+            readNext(g)
         }
     }
 
@@ -354,6 +424,50 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun readAllCharacteristics(g: BluetoothGatt) {
+        if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
+        try {
+            readQueue.clear()
+            g.getService(ESS_UUID)?.let { ess ->
+                listOf(TEMP_UUID, HUM_UUID, PRESS_UUID).forEach { uuid ->
+                    ess.getCharacteristic(uuid)?.let { readQueue.add(it) }
+                }
+            }
+            g.getService(PMS_SERVICE_UUID)?.let { pms ->
+                listOf(PM25_UUID, PM10_UUID).forEach { uuid ->
+                    pms.getCharacteristic(uuid)?.let { readQueue.add(it) }
+                }
+            }
+            readNext(g)
+        } catch (e: SecurityException) {
+            BLEState.reset()
+        }
+    }
+
+    private fun readNext(g: BluetoothGatt) {
+        val c = readQueue.poll() ?: return
+        if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
+        try {
+            g.readCharacteristic(c)
+        } catch (e: SecurityException) {
+            BLEState.reset()
+        }
+    }
+
+    private fun startPolling(g: BluetoothGatt) {
+        if (!polling) return
+        gatt = g
+        gatt?.let { readAllCharacteristics(it) }
+        gatt?.device?.let {
+            window.decorView.postDelayed({
+                if (polling && gatt != null) {
+                    gatt?.let { readAllCharacteristics(it) }
+                    startPolling(g)
+                }
+            }, 2000)
+        }
+    }
+
     private fun requestData(g: BluetoothGatt, offset: Int) {
         val dataService = g.getService(DATA_SERVICE_UUID) ?: return
         val reqChar = dataService.getCharacteristic(DATA_REQ_UUID) ?: return
@@ -369,11 +483,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun appendChunk(chunk: ByteArray) {
+        if (chunk.isEmpty()) return
         val line = chunk.toString(Charsets.UTF_8)
         openFileOutput(FILE, Context.MODE_APPEND).use {
             it.write(line.toByteArray())
         }
         dataOffset += chunk.size
+        gatt?.let { requestData(it, dataOffset) }
     }
 
     private fun save(t: Long) {
@@ -402,6 +518,7 @@ object BLEState {
     val humHistory = mutableStateListOf<Pair<Long, Double>>()
     val pm25History = mutableStateListOf<Pair<Long, Double>>()
     val pm10History = mutableStateListOf<Pair<Long, Double>>()
+    private var lastHistoryUpdate = 0L
 
     fun addDevice(d: BluetoothDevice) {
         if (!devices.contains(d)) devices.add(d)
@@ -409,22 +526,29 @@ object BLEState {
 
     fun addTemp(v: Double) {
         temperature = v
-        tempHistory.add(System.currentTimeMillis() to v)
+        addHistory(tempHistory, v)
     }
 
     fun addHum(v: Double) {
         humidity = v
-        humHistory.add(System.currentTimeMillis() to v)
+        addHistory(humHistory, v)
     }
 
     fun addPm25(v: Double) {
         pm25 = v
-        pm25History.add(System.currentTimeMillis() to v)
+        addHistory(pm25History, v)
     }
 
     fun addPm10(v: Double) {
         pm10 = v
-        pm10History.add(System.currentTimeMillis() to v)
+        addHistory(pm10History, v)
+    }
+
+    private fun addHistory(list: MutableList<Pair<Long, Double>>, value: Double) {
+        val now = System.currentTimeMillis()
+        if (now - lastHistoryUpdate < 1000L) return
+        lastHistoryUpdate = now
+        list.add(now to value)
     }
 
     fun reset() {
@@ -453,14 +577,16 @@ fun BLEScreen(
     onStartScan: () -> Unit,
     onStopScan: () -> Unit
 ) {
+    LaunchedEffect(BLEState.isConnected) {
+        if (BLEState.isConnected) {
+            onOpenLive()
+        }
+    }
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = {
-                    Text(
-                        if (BLEState.isConnected) "Live" else "Appareils",
-                        style = MaterialTheme.typography.titleLarge
-                    )
+                    Text("Appareils", style = MaterialTheme.typography.titleLarge)
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background
@@ -512,7 +638,11 @@ fun DeviceList(
             }
         }
         Spacer(Modifier.height(12.dp))
-        Button(onClick = onOpenLive, modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = onOpenLive,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = BLEState.isConnected
+        ) {
             Text("Ouvrir le live")
         }
         if (BLEState.isScanning) {
@@ -632,13 +762,6 @@ fun Dashboard(
             v = BLEState.humidity,
             unit = "%",
             onView = { analysis = AnalysisTarget.Humidity }
-        )
-        Sensor(
-            label = "Pression",
-            icon = Icons.Filled.Speed,
-            v = BLEState.pressure,
-            unit = "hPa",
-            onView = { analysis = AnalysisTarget.Pressure }
         )
         Sensor(
             label = "PM2.5",
