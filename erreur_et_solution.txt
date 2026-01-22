@@ -1,0 +1,144 @@
+ERREUR ET SOLUTIONS - Journal complet
+
+1) Unresolved reference: co.* / Point / LineChartData / LinePlotData
+   Cause: Dépendance YCharts absente ou Gradle non synchronisé.
+   Comment j’ai résolu: j’ai ajouté la lib YCharts dans les versions Gradle
+   et dans les dépendances de l’app, puis j’ai relancé un "Gradle Sync".
+   Sans sync, Android Studio ne télécharge pas la librairie.
+   Enfin, j’ai passé minSdk à 26 car YCharts ne compile pas en dessous.
+
+2) Manifest merger failed (minSdk trop bas)
+   Cause: YCharts nécessite minSdk 26.
+   Comment j’ai résolu: j’ai ouvert app/build.gradle.kts et changé minSdk
+   à 26, puis Gradle Sync. Le merge du manifest a ensuite fonctionné.
+
+3) @Composable errors ("Expecting a top level declaration", appels Composable hors composable)
+   Cause: un morceau de code UI avait été collé dans onCreate.
+   Comment j’ai résolu: j’ai déplacé le code UI dans des fonctions
+   @Composable et laissé dans onCreate uniquement setContent { ... }.
+
+4) API experimentale Material3
+   Cause: CenterAlignedTopAppBar est expérimental.
+   Comment j’ai résolu: j’ai ajouté l’annotation @OptIn(ExperimentalMaterial3Api::class)
+   au-dessus des composables qui l’utilisent.
+
+5) Redéclaration SensorData
+   Cause: la classe était définie deux fois.
+   Comment j’ai résolu: j’ai gardé la version dans SensorDataUtils.kt
+   et supprimé celle de MainActivity.kt.
+
+6) Permissions BLE lint
+   Cause: Android exige une vérification de permission avant d’appeler BLE.
+   Comment j’ai résolu: j’ai ajouté checkSelfPermission avant chaque appel BLE
+   (scan/connect/notify) et encapsulé l’appel dans try/catch SecurityException.
+
+7) Encodage accénts cassés ("Temp�rature", etc.)
+   Cause: encodage fichier mal reconnu.
+   Comment j’ai résolu: j’ai remplacé les textes accentués par une version
+   ASCII (Temperature/Humidite/Deconnecter) pour éviter la corruption.
+
+8) Erreur chart API (LinePlotData)
+   Cause: mauvais constructeur.
+   Comment j’ai résolu: j’ai utilisé LinePlotData(lines = listOf(...))
+   car l’API attend un paramètre nommé "lines".
+
+9) Erreur BLUETOOTH_PRIVILEGED pendant scan
+   Cause: certains appareils bloquent le scan moderne sans permission système.
+   Comment j’ai résolu: j’ai forcé le scan legacy (BluetoothAdapter.startLeScan)
+   et supprimé les ScanSettings. J’ai aussi ajouté les permissions BLE classiques
+   (BLUETOOTH/BLUETOOTH_ADMIN) pour Android <= 11 et "neverForLocation".
+
+10) Crash ACTION_HOVER_EXIT (Compose)
+   Cause: bug hover sur certains appareils.
+   Comment j’ai résolu: j’ai remplacé les AssistChip cliquables par un
+   Surface non cliquable (pas d’événements hover). Optionnel: bloquer les hover.
+
+11) Crash rememberSaveable Thresholds
+   Cause: Thresholds n’est pas sauvegardable dans un Bundle.
+   Comment j’ai résolu: j’ai utilisé remember (pas rememberSaveable)
+   et persisté les valeurs dans SharedPreferences.
+
+12) Historique modal ne suit pas les données filtrées
+   Cause: la modal prenait les valeurs live.
+   Comment j’ai résolu: j’ai passé la liste filtrée (jour/semaine/mois)
+   à la modal pour calculer la jauge.
+
+13) BuildConfig unresolved
+   Cause: BuildConfig pas généré dans ce module.
+   Comment j’ai résolu: j’ai retiré BuildConfig.DEBUG et utilisé un log simple.
+
+14) BufferUnderflowException en BLE
+   Cause: le payload BLE était parfois trop court.
+   Comment j’ai résolu: j’ai vérifié la taille du buffer avant getShort/getInt.
+
+15) Erreur "Expecting an element" / onEditThresholds
+   Cause: virgule manquante.
+   Comment j’ai résolu: correction syntaxique de l’appel AnalysisDialog.
+
+16) Le live reste sur Appareils
+   Cause: navigation manuelle.
+   Comment j’ai résolu: bouton "Ouvrir le live" + auto navigation quand connecté.
+
+17) Aucune donnée affichée malgré connexion
+   Cause: le sketch advertising-only n’envoie pas de caractéristiques.
+   Comment j’ai résolu: j’ai utilisé le sketch GATT (impose des services BLE)
+   ou ajouté les services GATT manquants.
+
+18) PMS7003 UART
+   Cause: UART0 (GPIO1/3) bloque le Serial USB.
+   Comment j’ai résolu: j’ai déplacé le PMS sur UART2 (RX=16, TX=17).
+
+19) PMS7003 pas reçu en BLE
+   Cause: CCCD callbacks manquants.
+   Comment j’ai résolu: j’ai créé un BLE2902 par char PM et attaché CCCDCallbacks.
+
+20) DHT11 remplace BME280
+   Cause: changement capteur.
+   Comment j’ai résolu: j’ai remplacé les appels BME280 par DHT.h,
+   et géré NaN en mettant des valeurs par défaut.
+
+21) PMS7003 advertising-only ne connecte pas
+   Cause: pas de services GATT.
+   Comment j’ai résolu: j’ai ajouté un service PMS et des caractéristiques notify.
+
+22) Historique CSV sans PM
+   Cause: CSV incomplet.
+   Comment j’ai résolu: j’ai ajouté pm25/pm10 dans l’alimentation CSV côté ESP32
+   et mis à jour le parsing Android.
+
+23) Transfert historique BLE
+   Cause: un seul chunk envoyé.
+   Comment j’ai résolu: après chaque chunk reçu, l’app redemande le suivant.
+
+24) Humidité non affichée
+   Cause: plusieurs readCharacteristic envoyés en même temps.
+   Comment j’ai résolu: j’ai créé une queue pour lire les caractéristiques
+   une par une (readQueue + readNext).
+
+25) Lags / Skipped frames
+   Cause: trop d’updates UI.
+   Comment j’ai résolu: j’ai limité les updates historiques à 1/s
+   et ajouté un polling BLE toutes les 2 secondes.
+
+26) Git push bloqué (app/build.zip >100MB)
+   Cause: fichier trop lourd dans l’historique.
+   Comment j’ai résolu: j’ai réécrit l’historique avec git filter-branch
+   pour supprimer app/build.zip, puis force push.
+
+27) Crash lors de modifs UI (imports/strings)
+   Cause: erreurs de copier-coller.
+   Comment j’ai résolu: patch ciblé et nettoyage des imports.
+
+28) BLE scan non visible
+   Cause: Bluetooth OFF ou permissions.
+   Comment j’ai résolu: activer Bluetooth + vérifier permissions
+   et fallback legacy scan.
+
+29) Graphes absents
+   Cause: listes vides.
+   Comment j’ai résolu: afficher les graphes live avec données existantes
+   et personnaliser les axes.
+
+30) Exports CSV
+   Cause: en-têtes incomplets.
+   Comment j’ai résolu: mise à jour des headers CSV.
