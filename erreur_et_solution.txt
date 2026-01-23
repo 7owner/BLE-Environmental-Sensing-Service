@@ -142,3 +142,21 @@ ERREUR ET SOLUTIONS - Journal complet
 30) Exports CSV
    Cause: en-têtes incomplets.
    Comment j’ai résolu: mise à jour des headers CSV.
+
+31) ACTION_HOVER_EXIT crash
+   Cause: bug hover sur certains appareils Android.
+   Comment j’ai résolu: remplacé les AssistChip cliquables par Surface non cliquable
+   et désactivé les hover events.
+
+32) BLUETOOTH_PRIVILEGED lors du scan
+   Cause: certains ROM OEM exigent une permission système pour le scan moderne.
+   Comment j’ai résolu: utilisation du scan legacy (BluetoothAdapter.startLeScan)
+   et suppression des ScanSettings.
+
+33) Données BLE non lues (humidité/PM)
+   Cause: plusieurs readCharacteristic lancés en parallèle, seuls les premiers passent.
+   Comment j’ai résolu: mise en place d’une file d’attente et lecture séquentielle.
+
+34) Notifications PM non activées
+   Cause: CCCD callbacks manquants sur PM2.5/PM10.
+   Comment j’ai résolu: ajout BLE2902 avec callbacks CCCD pour PM2.5/PM10.
