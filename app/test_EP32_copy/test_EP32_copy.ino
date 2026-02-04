@@ -4,7 +4,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include <Adafruit_BME280.h>
+#include <DHT.h>
 #include <Preferences.h>
 #include <LittleFS.h>
 
@@ -39,7 +39,9 @@ BLECharacteristic *dataChunkChar;
 BLECharacteristic *pm25Char;
 BLECharacteristic *pm10Char;
 
-Adafruit_BME280 bme;
+static const int DHT_PIN = 2;
+#define DHT_TYPE DHT11
+DHT dht(DHT_PIN, DHT_TYPE);
 Preferences prefs;
 
 bool deviceConnected = false;
@@ -100,10 +102,10 @@ class CCCDCallbacks : public BLEDescriptorCallbacks {
 
 class TimeCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *c) override {
-    std::string value = c->getValue();
-    if (value.size() < sizeof(uint32_t)) return;
+    String value = c->getValue();
+    if (value.length() < sizeof(uint32_t)) return;
     uint32_t epoch = 0;
-    memcpy(&epoch, value.data(), sizeof(uint32_t));
+    memcpy(&epoch, value.c_str(), sizeof(uint32_t));
     epochOffset = (int64_t)epoch - (int64_t)(millis() / 1000);
     timeSynced = true;
     prefs.putULong("epoch", epoch);
@@ -114,10 +116,10 @@ class TimeCallbacks : public BLECharacteristicCallbacks {
 
 class DataReqCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *c) override {
-    std::string value = c->getValue();
-    if (value.size() < sizeof(uint32_t)) return;
+    String value = c->getValue();
+    if (value.length() < sizeof(uint32_t)) return;
     uint32_t offset = 0;
-    memcpy(&offset, value.data(), sizeof(uint32_t));
+    memcpy(&offset, value.c_str(), sizeof(uint32_t));
     readOffset = offset;
   }
 };
@@ -130,11 +132,11 @@ void setup() {
   delay(500);
 
   Serial.println("===================================");
-  Serial.println(" ESP32 BLE ESS + BME280");
+  Serial.println(" ESP32 BLE ESS + DHT11");
   Serial.println("===================================");
 
-  /* ===== BME280 ===== */
-  Wire.begin();
+  /* ===== DHT11 ===== */
+  dht.begin();
 
   Serial2.begin(9600, SERIAL_8N1, PMS_RX_PIN, PMS_TX_PIN);
   Serial.println("[PMS7003] UART2 init");
@@ -151,14 +153,14 @@ void setup() {
     timeSynced = lastEpoch > 0;
     Serial.printf("[TIME] Repris: %lu\n", (unsigned long)lastEpoch);
   }
-  if (!bme.begin(0x76)) {
+  if (false) {
     Serial.println("[BME280] ❌ Capteur non détecté");
     while (1);
   }
   Serial.println("[BME280] ✅ Initialisé");
 
   /* ===== BLE INIT ===== */
-  BLEDevice::init("ESP32-BME");
+  BLEDevice::init("ESP32-DHT");
 
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -210,13 +212,21 @@ void setup() {
     PM25_UUID,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
   );
-  pm25Char->addDescriptor(new BLE2902());
+  {
+    BLE2902 *cccd = new BLE2902();
+    cccd->setCallbacks(new CCCDCallbacks());
+    pm25Char->addDescriptor(cccd);
+  }
 
   pm10Char = pmsService->createCharacteristic(
     PM10_UUID,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
   );
-  pm10Char->addDescriptor(new BLE2902());
+  {
+    BLE2902 *cccd = new BLE2902();
+    cccd->setCallbacks(new CCCDCallbacks());
+    pm10Char->addDescriptor(cccd);
+  }
 
   ess->start();
   timeService->start();
@@ -229,7 +239,7 @@ void setup() {
 
   // Advertising principal → NOM SEUL
   BLEAdvertisementData advData;
-  advData.setName("ESP32-BME");
+  advData.setName("ESP32-DHT");
   adv->setAdvertisementData(advData);
 
   // Scan response → SERVICE ESS
@@ -254,17 +264,25 @@ void loop() {
 
   if (!timeSynced) return;
 
-  float t = bme.readTemperature();
-  float h = bme.readHumidity();
-  float p = bme.readPressure() / 100.0;
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  float p = 0.0;
 
-  readPms();
+  if (isnan(t) || isnan(h)) {
+  Serial.println("[DHT11] Read failed");
+    t = 0;
+    h = 0;
+  }
+
+  if (readPms()) {
+    Serial.printf("[PMS7003] PM2.5=%u ug/m3 | PM10=%u ug/m3\n", lastPm25, lastPm10);
+  }
 
   uint32_t epoch = (uint32_t)((millis() / 1000) + epochOffset);
 
   File f = LittleFS.open(DATA_FILE, FILE_APPEND);
   if (f) {
-    f.printf("%lu,%.2f,%.2f,%.2f\n", (unsigned long)epoch, t, h, p);
+    f.printf("%lu,%.2f,%.2f,%.2f,%.2f,%.2f\n", (unsigned long)epoch, t, h, p, (float)lastPm25, (float)lastPm10);
     f.close();
   }
 
@@ -291,32 +309,24 @@ void loop() {
 
   Serial.printf("T=%.2f °C | H=%.2f %% | P=%.2f hPa\n", t, h, p);
 
-  if (notifyTemp) {
-    int16_t v = (int16_t)(t * 100);
-    tempChar->setValue((uint8_t*)&v, 2);
-    tempChar->notify();
-  }
+  int16_t tempRaw = (int16_t)(t * 100);
+  uint16_t humRaw = (uint16_t)(h * 100);
+  uint32_t pressRaw = (uint32_t)(p * 100);
 
-  if (notifyHum) {
-    uint16_t v = (uint16_t)(h * 100);
-    humChar->setValue((uint8_t*)&v, 2);
-    humChar->notify();
-  }
+  tempChar->setValue((uint8_t*)&tempRaw, 2);
+  humChar->setValue((uint8_t*)&humRaw, 2);
+  pressChar->setValue((uint8_t*)&pressRaw, 4);
 
-  if (notifyPress) {
-    uint32_t v = (uint32_t)(p * 100);
-    pressChar->setValue((uint8_t*)&v, 4);
-    pressChar->notify();
-  }
+  if (notifyTemp) tempChar->notify();
+  if (notifyHum) humChar->notify();
+  if (notifyPress) pressChar->notify();
 
-  if (notifyPm25) {
+  if (deviceConnected) {
     pm25Char->setValue((uint8_t*)&lastPm25, 2);
-    pm25Char->notify();
-  }
-
-  if (notifyPm10) {
     pm10Char->setValue((uint8_t*)&lastPm10, 2);
-    pm10Char->notify();
+
+    if (notifyPm25) pm25Char->notify();
+    if (notifyPm10) pm10Char->notify();
   }
 
   if (deviceConnected) {

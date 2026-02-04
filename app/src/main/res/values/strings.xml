@@ -1,3 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Environmental-Sensing-Service</string>
+
+    <!-- Dashboard -->
+    <string name="dashboard_title">Monitoring Live</string>
+    <string name="device_info">ESP32 - Environmental Sensing</string>
+
+    <!-- Status -->
+    <string name="status_offline">OFFLINE</string>
+    <string name="status_live_polling">LIVE - POLLING</string>
+    <string name="status_live_notify">LIVE - NOTIFY</string>
+    <string name="status_connected">Connecte</string>
+    <string name="status_offline_short">Hors ligne</string>
+
+    <!-- Quality Labels -->
+    <string name="quality_good">Bonne</string>
+    <string name="quality_warning">A surveiller</string>
+    <string name="quality_bad">Mauvaise</string>
+    <string name="quality_unknown">Inconnue</string>
+
+    <!-- Quality Badges -->
+    <string name="badge_ok">OK</string>
+    <string name="badge_warning">A SURVEILLER</string>
+    <string name="badge_critical">CRITIQUE</string>
+    <string name="badge_na">N/A</string>
+
+    <!-- Air Quality -->
+    <string name="air_quality_title">Qualite de l air</string>
+    <string name="air_quality_excellent">EXCELLENTE</string>
+    <string name="air_quality_average">MOYENNE</string>
+    <string name="air_quality_poor">MAUVAISE</string>
+    <string name="air_quality_unknown">INCONNUE</string>
+
+    <!-- Labels -->
+    <string name="temperature_label">Temperature</string>
+    <string name="humidity_label">Humidite</string>
+    <string name="pm25_label">PM2.5</string>
+    <string name="pm10_label">PM10</string>
+
+    <!-- Units -->
+    <string name="temperature_unit">C</string>
+    <string name="humidity_unit">%</string>
+    <string name="pm_unit">ug/m3</string>
+
+    <!-- Sparklines -->
+    <string name="recent_evolution_title">Evolution recente</string>
+    <string name="sparkline_temp_label">Temp</string>
+    <string name="sparkline_hum_label">Hum</string>
+    <string name="sparkline_pm25_label">PM2.5</string>
+
+    <!-- Status Bar -->
+    <string name="no_data">Aucune donnee</string>
+    <string name="last_update">Derniere mise a jour: %1$s</string>
+    <string name="last_update_offline">Derniere mesure (hors ligne): %1$s</string>
+
+    <!-- Buttons -->
+    <string name="details_button">Details</string>
+
+    <!-- Accessibility -->
+    <string name="temperature_icon_desc">Icone temperature</string>
+    <string name="humidity_icon_desc">Icone humidite</string>
+    <string name="air_quality_icon_desc">Icone qualite de l air</string>
+    <string name="chart_icon_desc">Icone graphique</string>
+    <string name="view_details_icon_desc">Voir les details</string>
 </resources>

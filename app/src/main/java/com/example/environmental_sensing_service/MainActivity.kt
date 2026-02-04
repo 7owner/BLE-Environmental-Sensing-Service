@@ -1,12 +1,16 @@
 package com.example.environmental_sensing_service
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.widget.Toast
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -31,6 +35,8 @@ import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,6 +55,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.example.environmental_sensing_service.ui.theme.EnvironmentalSensingServiceTheme
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -57,6 +65,9 @@ import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.ArrayDeque
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 
 // Charts
 import co.yml.charts.axis.AxisData
@@ -97,6 +108,8 @@ class MainActivity : ComponentActivity() {
     private val PM10_UUID = UUID.fromString("0000FF32-0000-1000-8000-00805f9b34fb")
 
     private val FILE = "sensor_data.csv"
+    private val ALERT_CHANNEL_ID = "critical_alerts"
+    private val ALERT_COOLDOWN_MS = 5 * 60 * 1000L
 
     private lateinit var scanner: BluetoothLeScanner
     private lateinit var bluetoothAdapter: BluetoothAdapter
@@ -108,6 +121,9 @@ class MainActivity : ComponentActivity() {
     private var initialReadsDone = false
     private var polling = false
     private val readQueue = ArrayDeque<BluetoothGattCharacteristic>()
+    private var lastTempAlertAt = 0L
+    private var lastAirAlertAt = 0L
+    private var lastSavedAt = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,6 +134,7 @@ class MainActivity : ComponentActivity() {
             openFileOutput(FILE, Context.MODE_APPEND)
                 .write("timestamp,temp,hum,press,pm25,pm10\n".toByteArray())
         }
+        createNotificationChannel()
         bluetoothAdapter = getSystemService(BluetoothManager::class.java).adapter
         scanner = bluetoothAdapter.bluetoothLeScanner
 
@@ -130,6 +147,38 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     var screen by remember { mutableStateOf<Screen>(Screen.Ble) }
+
+                    LaunchedEffect(
+                        BLEState.temperature,
+                        BLEState.pm25,
+                        BLEState.pm10,
+                        ThresholdState.temperature
+                    ) {
+                        checkAlerts()
+                    }
+
+                    LaunchedEffect(
+                        BLEState.temperature,
+                        BLEState.humidity,
+                        BLEState.pressure,
+                        BLEState.pm25,
+                        BLEState.pm10
+                    ) {
+                        val hasData = BLEState.temperature != null ||
+                            BLEState.humidity != null ||
+                            BLEState.pressure != null ||
+                            BLEState.pm25 != null ||
+                            BLEState.pm10 != null
+                        if (hasData) {
+                            val now = System.currentTimeMillis()
+                            if (now - lastSavedAt >= 1000L) {
+                                lastSavedAt = now
+                                withContext(Dispatchers.IO) {
+                                    save(now)
+                                }
+                            }
+                        }
+                    }
 
                     when (screen) {
                         Screen.Ble -> BLEScreen(
@@ -164,20 +213,80 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestPermissions() {
+        val permissions = mutableListOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
         ) { }.launch(
-            arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
+            permissions.toTypedArray()
         )
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                ALERT_CHANNEL_ID,
+                "Alertes critiques",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            channel.description = "Alertes temperature et qualite d'air"
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+    }
+
+    private fun checkAlerts() {
+        val now = System.currentTimeMillis()
+        val tempQuality = qualityForTemperature(BLEState.temperature)
+        if (tempQuality == Quality.Bad && now - lastTempAlertAt >= ALERT_COOLDOWN_MS) {
+            val value = BLEState.temperature?.let { "%.1f".format(it) } ?: "--"
+            sendAlert(
+                id = 1001,
+                title = "Temperature critique",
+                message = "Trop chaud : $value°C. Faites attention."
+            )
+            lastTempAlertAt = now
+        }
+
+        val pm25Quality = qualityForPm25(BLEState.pm25)
+        val pm10Quality = qualityForPm10(BLEState.pm10)
+        if ((pm25Quality == Quality.Bad || pm10Quality == Quality.Bad) &&
+            now - lastAirAlertAt >= ALERT_COOLDOWN_MS
+        ) {
+            sendAlert(
+                id = 1002,
+                title = "Qualite d'air mauvaise",
+                message = "Air pollue detecte. Veuillez ouvrir les fenetres."
+            )
+            lastAirAlertAt = now
+        }
+    }
+
+    private fun sendAlert(id: Int, title: String, message: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !has(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            return
+        }
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(this).notify(id, notification)
     }
 
     private fun has(p: String) =
         ActivityCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
+    @SuppressLint("MissingPermission")
     private fun startScan() {
         if (has(Manifest.permission.BLUETOOTH_SCAN)) {
             try {
@@ -191,6 +300,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun stopScan() {
         if (has(Manifest.permission.BLUETOOTH_SCAN)) {
             try {
@@ -241,6 +351,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun connect(d: BluetoothDevice) {
         if (has(Manifest.permission.BLUETOOTH_CONNECT)) {
             try {
@@ -251,6 +362,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun disconnect() {
         if (has(Manifest.permission.BLUETOOTH_CONNECT)) {
             try {
@@ -266,11 +378,13 @@ class MainActivity : ComponentActivity() {
 
     private val gattCallback = object : BluetoothGattCallback() {
 
+        @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, s: Int, n: Int) {
             if (n == BluetoothProfile.STATE_CONNECTED) {
                 BLEState.isConnected = true
                 initialReadsDone = false
                 polling = true
+                BLEState.isPolling = true
                 if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
                 try {
                     g.discoverServices()
@@ -279,10 +393,12 @@ class MainActivity : ComponentActivity() {
                 }
             } else {
                 polling = false
+                BLEState.isPolling = false
                 BLEState.reset()
             }
         }
 
+        @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, s: Int) {
             if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
             val ess = g.getService(ESS_UUID)
@@ -398,6 +514,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun writeNext(g: BluetoothGatt) {
         if (writing) return
         val d = cccdQueue.poll() ?: return
@@ -410,6 +527,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun syncTime(g: BluetoothGatt) {
         val timeService = g.getService(TIME_SERVICE_UUID) ?: return
         val timeChar = timeService.getCharacteristic(TIME_UUID) ?: return
@@ -424,6 +542,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun readAllCharacteristics(g: BluetoothGatt) {
         if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
         try {
@@ -444,6 +563,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun readNext(g: BluetoothGatt) {
         val c = readQueue.poll() ?: return
         if (!has(Manifest.permission.BLUETOOTH_CONNECT)) return
@@ -468,6 +588,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun requestData(g: BluetoothGatt, offset: Int) {
         val dataService = g.getService(DATA_SERVICE_UUID) ?: return
         val reqChar = dataService.getCharacteristic(DATA_REQ_UUID) ?: return
@@ -513,12 +634,17 @@ object BLEState {
     var pm10 by mutableStateOf<Double?>(null)
     var isConnected by mutableStateOf(false)
     var isScanning by mutableStateOf(false)
+    var isPolling by mutableStateOf(false)
+    var lastUpdate by mutableStateOf<Long?>(null)
 
     val tempHistory = mutableStateListOf<Pair<Long, Double>>()
     val humHistory = mutableStateListOf<Pair<Long, Double>>()
     val pm25History = mutableStateListOf<Pair<Long, Double>>()
     val pm10History = mutableStateListOf<Pair<Long, Double>>()
-    private var lastHistoryUpdate = 0L
+    private var lastTempHistoryUpdate = 0L
+    private var lastHumHistoryUpdate = 0L
+    private var lastPm25HistoryUpdate = 0L
+    private var lastPm10HistoryUpdate = 0L
 
     fun addDevice(d: BluetoothDevice) {
         if (!devices.contains(d)) devices.add(d)
@@ -526,42 +652,58 @@ object BLEState {
 
     fun addTemp(v: Double) {
         temperature = v
-        addHistory(tempHistory, v)
+        addTempHistory(v)
     }
 
     fun addHum(v: Double) {
         humidity = v
-        addHistory(humHistory, v)
+        addHumHistory(v)
     }
 
     fun addPm25(v: Double) {
         pm25 = v
-        addHistory(pm25History, v)
+        addPm25History(v)
     }
 
     fun addPm10(v: Double) {
         pm10 = v
-        addHistory(pm10History, v)
+        addPm10History(v)
     }
 
-    private fun addHistory(list: MutableList<Pair<Long, Double>>, value: Double) {
+    private fun addTempHistory(value: Double) {
         val now = System.currentTimeMillis()
-        if (now - lastHistoryUpdate < 1000L) return
-        lastHistoryUpdate = now
-        list.add(now to value)
+        if (now - lastTempHistoryUpdate < 1000L) return
+        lastTempHistoryUpdate = now
+        lastUpdate = now
+        tempHistory.add(now to value)
+    }
+
+    private fun addHumHistory(value: Double) {
+        val now = System.currentTimeMillis()
+        if (now - lastHumHistoryUpdate < 1000L) return
+        lastHumHistoryUpdate = now
+        lastUpdate = now
+        humHistory.add(now to value)
+    }
+
+    private fun addPm25History(value: Double) {
+        val now = System.currentTimeMillis()
+        if (now - lastPm25HistoryUpdate < 1000L) return
+        lastPm25HistoryUpdate = now
+        lastUpdate = now
+        pm25History.add(now to value)
+    }
+
+    private fun addPm10History(value: Double) {
+        val now = System.currentTimeMillis()
+        if (now - lastPm10HistoryUpdate < 1000L) return
+        lastPm10HistoryUpdate = now
+        lastUpdate = now
+        pm10History.add(now to value)
     }
 
     fun reset() {
         devices.clear()
-        tempHistory.clear()
-        humHistory.clear()
-        pm25History.clear()
-        pm10History.clear()
-        temperature = null
-        humidity = null
-        pressure = null
-        pm25 = null
-        pm10 = null
         isConnected = false
         isScanning = false
     }
@@ -697,110 +839,15 @@ fun Dashboard(
 ) {
     var analysis by remember { mutableStateOf<AnalysisTarget?>(null) }
 
-    Column(
-        Modifier.padding(20.dp).verticalScroll(rememberScrollState())
-    ) {
-        Text(
-            text = "Resume instantane",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilledTonalButton(
-                onClick = onStartScan,
-                modifier = Modifier.weight(1f),
-                enabled = !BLEState.isScanning
-            ) {
-                Icon(Icons.Filled.Refresh, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Scanner")
-            }
-            OutlinedButton(
-                onClick = onStopScan,
-                modifier = Modifier.weight(1f),
-                enabled = BLEState.isScanning
-            ) {
-                Text("Stop")
-            }
-        }
-        if (BLEState.isScanning) {
-            val pulse = rememberInfiniteTransition(label = "scanPulse")
-            val scale by pulse.animateFloat(
-                initialValue = 1f,
-                targetValue = 1.05f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(700, easing = LinearEasing),
-                    repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
-                ),
-                label = "scanPulseScale"
-            )
-            Spacer(Modifier.height(10.dp))
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.scale(scale)
-            ) {
-                Text(
-                    "Scanning...",
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        Sensor(
-            label = "Temperature",
-            icon = Icons.Filled.Thermostat,
-            v = BLEState.temperature,
-            unit = "C",
-            onView = { analysis = AnalysisTarget.Temperature }
-        )
-        Sensor(
-            label = "Humidite",
-            icon = Icons.Filled.WaterDrop,
-            v = BLEState.humidity,
-            unit = "%",
-            onView = { analysis = AnalysisTarget.Humidity }
-        )
-        Sensor(
-            label = "PM2.5",
-            icon = Icons.Filled.Cloud,
-            v = BLEState.pm25,
-            unit = "ug/m3",
-            onView = { analysis = AnalysisTarget.Pm25 }
-        )
-        Sensor(
-            label = "PM10",
-            icon = Icons.Filled.Cloud,
-            v = BLEState.pm10,
-            unit = "ug/m3",
-            onView = { analysis = AnalysisTarget.Pm10 }
-        )
-        LiveOverlayChart(
-            buildPointsFromHistory(BLEState.tempHistory),
-            buildPointsFromHistory(BLEState.humHistory)
-        )
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilledTonalButton(
-                onClick = onDisconnect,
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(Icons.Filled.PowerSettingsNew, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Deconnecter")
-            }
-            Button(
-                onClick = onViewHistory,
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(Icons.Filled.History, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Historique")
-            }
-        }
-    }
+    LiveDashboard(
+        onDisconnect = onDisconnect,
+        onViewHistory = onViewHistory,
+        onEditThresholds = onEditThresholds,
+        onViewTemp = { analysis = AnalysisTarget.Temperature },
+        onViewHum = { analysis = AnalysisTarget.Humidity },
+        onViewPm25 = { analysis = AnalysisTarget.Pm25 },
+        onViewPm10 = { analysis = AnalysisTarget.Pm10 }
+    )
 
     analysis?.let { target ->
         AnalysisDialog(
@@ -1267,37 +1314,124 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
     var data by remember { mutableStateOf<List<SensorData>>(emptyList()) }
     var analysis by remember { mutableStateOf<AnalysisTarget?>(null) }
     var range by remember { mutableStateOf(HistoryRange.Week) }
+    var startDateMillis by remember { mutableStateOf<Long?>(null) }
+    var endDateMillis by remember { mutableStateOf<Long?>(null) }
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
 
     val exportCsv = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/csv")
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         context.contentResolver.openOutputStream(uri)?.use {
-            it.write("timestamp,temp,hum,press,pm25,pm10\n".toByteArray())
-            data.forEach { d -> it.write((d.toCsv() + "\n").toByteArray()) }
+            it.write("datetime,temp,hum,press,pm25,pm10\n".toByteArray())
+            data.forEach { d ->
+                val line = buildString {
+                    append(formatDateTime(d.timestamp))
+                    append(',')
+                    append(d.temperature ?: "")
+                    append(',')
+                    append(d.humidity ?: "")
+                    append(',')
+                    append(d.pressure ?: "")
+                    append(',')
+                    append(d.pm25 ?: "")
+                    append(',')
+                    append(d.pm10 ?: "")
+                }
+                it.write((line + "\n").toByteArray())
+            }
         }
         Toast.makeText(context, "CSV exporté ✔", Toast.LENGTH_SHORT).show()
     }
 
     fun load() {
         val list = mutableListOf<SensorData>()
-        context.openFileInput("sensor_data.csv").use {
-            BufferedReader(InputStreamReader(it)).readLines().drop(1).forEach { l ->
-                val p = l.split(",")
-                if (p.size >= 4)
-                    list.add(
-                        SensorData(
-                            p[0].toLong(),
-                            p[1].toDoubleOrNull(),
-                            p[2].toDoubleOrNull(),
-                            p[3].toDoubleOrNull(),
-                            p.getOrNull(4)?.toDoubleOrNull(),
-                            p.getOrNull(5)?.toDoubleOrNull()
+        try {
+            context.openFileInput("sensor_data.csv").use { input ->
+                val lines = BufferedReader(InputStreamReader(input)).readLines()
+                val dataLines = if (lines.firstOrNull()?.startsWith("timestamp") == true) {
+                    lines.drop(1)
+                } else {
+                    lines
+                }
+                val numberRegex = Regex("-?\\d+(?:\\.\\d+)?")
+                dataLines.forEach { l ->
+                    val parts = l.split(',', ';', '\t').map { it.trim() }.filter { it.isNotEmpty() }
+                    val values = if (parts.size >= 4) {
+                        parts
+                    } else {
+                        numberRegex.findAll(l).map { it.value }.toList()
+                    }
+                    if (values.size >= 4) {
+                        list.add(
+                            SensorData(
+                                values[0].toLongOrNull() ?: return@forEach,
+                                values.getOrNull(1)?.toDoubleOrNull(),
+                                values.getOrNull(2)?.toDoubleOrNull(),
+                                values.getOrNull(3)?.toDoubleOrNull(),
+                                values.getOrNull(4)?.toDoubleOrNull(),
+                                values.getOrNull(5)?.toDoubleOrNull()
+                            )
                         )
-                    )
+                    }
+                }
             }
+        } catch (e: Exception) {
+            Toast.makeText(context, "Aucune donnee sauvegardee", Toast.LENGTH_SHORT).show()
         }
         data = list
+    }
+
+    LaunchedEffect(Unit) {
+        load()
+    }
+
+    if (showStartPicker) {
+        val pickerState = rememberDatePickerState(
+            initialSelectedDateMillis = startDateMillis
+        )
+        DatePickerDialog(
+            onDismissRequest = { showStartPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    startDateMillis = pickerState.selectedDateMillis
+                    showStartPicker = false
+                }) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStartPicker = false }) {
+                    Text("Annuler")
+                }
+            }
+        ) {
+            DatePicker(state = pickerState)
+        }
+    }
+    if (showEndPicker) {
+        val pickerState = rememberDatePickerState(
+            initialSelectedDateMillis = endDateMillis
+        )
+        DatePickerDialog(
+            onDismissRequest = { showEndPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    endDateMillis = pickerState.selectedDateMillis
+                    showEndPicker = false
+                }) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEndPicker = false }) {
+                    Text("Annuler")
+                }
+            }
+        ) {
+            DatePicker(state = pickerState)
+        }
     }
 
     Scaffold(
@@ -1353,7 +1487,23 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
             RangeSelector(selected = range, onSelected = { range = it })
             Spacer(Modifier.height(12.dp))
 
-            val filtered = filterByRange(data, range)
+            Text(
+                text = "Intervalle",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = { showStartPicker = true }) {
+                    Text(startDateMillis?.let { formatDateTime(it) } ?: "Date debut")
+                }
+                OutlinedButton(onClick = { showEndPicker = true }) {
+                    Text(endDateMillis?.let { formatDateTime(it) } ?: "Date fin")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+
+            val filtered = filterByRangeWithInterval(data, range, startDateMillis, endDateMillis)
             val temps = filtered.mapNotNull { it.temperature }
             val hums = filtered.mapNotNull { it.humidity }
             val pm25s = filtered.mapNotNull { it.pm25 }
@@ -1397,8 +1547,35 @@ fun HistoryScreen(onBack: () -> Unit, onEditThresholds: () -> Unit) {
             }
 
             val baseTimestamp = filtered.firstOrNull()?.timestamp
+            Text(
+                text = "Temperature / Humidite",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
             OverlayChart(
                 buildPoints(filtered) { it.temperature },
+                buildPoints(filtered) { it.humidity },
+                baseTimestamp
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "PM2.5 / Humidite",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            OverlayChart(
+                buildPoints(filtered) { it.pm25 },
+                buildPoints(filtered) { it.humidity },
+                baseTimestamp
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "PM10 / Humidite",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            OverlayChart(
+                buildPoints(filtered) { it.pm10 },
                 buildPoints(filtered) { it.humidity },
                 baseTimestamp
             )
@@ -1453,6 +1630,28 @@ fun filterByRange(data: List<SensorData>, range: HistoryRange): List<SensorData>
     }
     val threshold = cal.timeInMillis
     return data.filter { it.timestamp >= threshold }
+}
+
+fun filterByRangeWithInterval(
+    data: List<SensorData>,
+    range: HistoryRange,
+    startDateMillis: Long?,
+    endDateMillis: Long?
+): List<SensorData> {
+    if (startDateMillis == null || endDateMillis == null) {
+        return filterByRange(data, range)
+    }
+    val zoneId = ZoneId.systemDefault()
+    val startDate = Instant.ofEpochMilli(startDateMillis).atZone(zoneId).toLocalDate()
+    val endDate = Instant.ofEpochMilli(endDateMillis).atZone(zoneId).toLocalDate()
+    val startMillis = startDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
+    val endMillis = endDate.plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli() - 1
+    return data.filter { it.timestamp in startMillis..endMillis }
+}
+
+fun formatDateTime(timestamp: Long): String {
+    val formatter = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault())
+    return formatter.format(Date(timestamp))
 }
 
 /* ================= STATS & CHARTS ================= */

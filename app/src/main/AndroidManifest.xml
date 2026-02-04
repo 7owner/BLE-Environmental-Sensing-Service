@@ -3,8 +3,19 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!-- ===== PERMISSIONS BLE ANDROID 12+ ===== -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Permissions pour Android <= 11 -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
 
     <!-- Requise pour le scan BLE (Android 12 → 15) -->
     <!-- Requise pour le scan BLE (Android 12 → 15) -->
